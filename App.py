@@ -1,183 +1,155 @@
-# app.py
-import os
-import datetime as dt
-import requests
 import streamlit as st
+import requests
+import datetime
 
-# =========================
-# Config & tema
-# =========================
-st.set_page_config(
-    page_title="✈️ Buscador de Passagens",
-    page_icon="✈️",
-    layout="centered",
-)
+# 🔑 Credenciais (configure no Streamlit Secrets)
+AMADEUS_API_KEY = st.secrets["AMADEUS_API_KEY"]
+AMADEUS_API_SECRET = st.secrets["AMADEUS_API_SECRET"]
 
-ACCENT = "#22c55e"
-st.markdown(
-    f"""
-    <style>
-      .stApp {{ background: #0f172a; color: #e2e8f0; }}
-      .stTextInput > div > div input, .stNumberInput input, .stDateInput input {{
-          background: #1e293b; color: #e2e8f0; border-radius: 12px;
-      }}
-      .stSelectbox > div > div {{ background: #1e293b; color: #e2e8f0; border-radius: 12px; }}
-      .stButton>button {{
-          background:{ACCENT}; color:#0b1220; border:0; border-radius:12px; padding:0.6rem 1rem; font-weight:700;
-      }}
-      .price {{ font-size:28px; font-weight:800; color:{ACCENT}; }}
-      .card {{ border:1px solid #334155; border-radius:16px; padding:14px; background:#0b1220; }}
-      .muted {{ color:#94a3b8 }}
-      a.buy {{ text-decoration:none; background:#3b82f6; color:white; padding:8px 12px; border-radius:10px; font-weight:700; }}
-      a.buy:hover {{ opacity:.9 }}
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+# 🌍 Endpoints da Amadeus
+TOKEN_URL = "https://test.api.amadeus.com/v1/security/oauth2/token"
+AIRPORTS_URL = "https://test.api.amadeus.com/v1/reference-data/locations"
+FLIGHTS_URL = "https://test.api.amadeus.com/v2/shopping/flight-offers"
 
-# =========================
-# Credenciais Amadeus
-# =========================
-AMADEUS_CLIENT_ID = st.secrets.get("AMADEUS_CLIENT_ID", os.getenv("AMADEUS_CLIENT_ID"))
-AMADEUS_CLIENT_SECRET = st.secrets.get("AMADEUS_CLIENT_SECRET", os.getenv("AMADEUS_CLIENT_SECRET"))
-AMADEUS_HOST = "https://test.api.amadeus.com"
-
-if not AMADEUS_CLIENT_ID or not AMADEUS_CLIENT_SECRET:
-    st.error("⚠️ Adicione suas chaves Amadeus em *Settings › Secrets* como `AMADEUS_CLIENT_ID` e `AMADEUS_CLIENT_SECRET`.")
-    st.stop()
-
-# =========================
-# Helpers Amadeus
-# =========================
-@st.cache_data(ttl=60 * 25)
-def get_access_token() -> str:
-    url = f"{AMADEUS_HOST}/v1/security/oauth2/token"
+# 🔑 Obter token de acesso
+@st.cache_data
+def get_access_token():
     data = {
         "grant_type": "client_credentials",
-        "client_id": AMADEUS_CLIENT_ID,
-        "client_secret": AMADEUS_CLIENT_SECRET,
+        "client_id": AMADEUS_API_KEY,
+        "client_secret": AMADEUS_API_SECRET
     }
-    r = requests.post(url, data=data, timeout=30)
-    r.raise_for_status()
-    return r.json()["access_token"]
+    response = requests.post(TOKEN_URL, data=data)
+    return response.json().get("access_token")
 
-def _headers():
-    return {"Authorization": f"Bearer {get_access_token()}"}
+# 🔎 Buscar aeroportos
+def search_airports(keyword, token):
+    params = {"subType": "AIRPORT", "keyword": keyword}
+    headers = {"Authorization": f"Bearer {token}"}
+    response = requests.get(AIRPORTS_URL, headers=headers, params=params)
+    if response.status_code == 200:
+        return response.json().get("data", [])
+    return []
 
-@st.cache_data(ttl=60 * 60)
-def search_locations(keyword: str):
-    if not keyword or len(keyword) < 2:
-        return []
-    url = f"{AMADEUS_HOST}/v1/reference-data/locations"
-    params = {"subType": "CITY,AIRPORT", "keyword": keyword, "view": "LIGHT", "page[limit]": 10}
-    r = requests.get(url, headers=_headers(), params=params, timeout=30)
-    if r.status_code != 200:
-        return []
-    data = r.json().get("data", [])
-    data.sort(key=lambda x: (x.get("subType") != "AIRPORT", x.get("name", "")))
-    return data
+# ✈️ Buscar voos
+def search_flights(origins, destination, departure_date, adults, token, return_date=None):
+    results = []
+    for origin in origins:
+        params = {
+            "originLocationCode": origin,
+            "destinationLocationCode": destination,
+            "departureDate": departure_date,
+            "adults": adults,
+            "currencyCode": "BRL"
+        }
+        if return_date:
+            params["returnDate"] = return_date
+        headers = {"Authorization": f"Bearer {token}"}
+        response = requests.get(FLIGHTS_URL, headers=headers, params=params)
+        if response.status_code == 200:
+            results.extend(response.json().get("data", []))
+    return results
 
-def fmt_duration(iso: str) -> str:
-    if not iso or not iso.startswith("PT"):
-        return ""
-    iso = iso[2:]
-    h, m = 0, 0
-    if "H" in iso:
-        parts = iso.split("H")
-        h = int(parts[0]) if parts[0] else 0
-        iso = parts[1] if len(parts) > 1 else ""
-    if "M" in iso:
-        parts = iso.split("M")
-        m = int(parts[0]) if parts[0] else 0
-    return f"{h}h{m:02d}"
+# ⏱️ Calcular duração em horas:min
+def format_duration(iso_duration):
+    try:
+        hours = int(iso_duration[2:iso_duration.index("H")]) if "H" in iso_duration else 0
+        minutes = int(iso_duration.split("H")[-1].replace("M", "")) if "M" in iso_duration else 0
+        return f"{hours}h {minutes}m"
+    except:
+        return iso_duration
 
-def google_flights_link(origin: str, dest: str, date: str, adults: int) -> str:
-    return f"https://www.google.com/travel/flights?q=Flights%20from%20{origin}%20to%20{dest}%20on%20{date}%20adults%3D{adults}"
-
-@st.cache_data(ttl=60)
-def search_offers(origin, destination, date, adults=1, currency="BRL", non_stop=False, max_results=20):
-    url = f"{AMADEUS_HOST}/v2/shopping/flight-offers"
-    params = {
-        "originLocationCode": origin,
-        "destinationLocationCode": destination,
-        "departureDate": date,
-        "adults": adults,
-        "currencyCode": currency,
-        "max": max_results,
-    }
-    if non_stop:
-        params["nonStop"] = "true"
-    r = requests.get(url, headers=_headers(), params=params, timeout=60)
-    if r.status_code != 200:
-        return {"error": r.text}
-    return r.json()
-
-# =========================
-# UI
-# =========================
+# 🚀 Interface do app
+st.set_page_config(page_title="Buscador de Passagens", page_icon="✈️", layout="wide")
 st.title("✈️ Buscador de Passagens Aéreas")
+st.write("Encontre voos baratos usando a API da Amadeus")
 
-with st.form("search"):
-    col1, col2 = st.columns(2)
-    with col1:
-        origin_text = st.text_input("Origem (cidade ou aeroporto)", value="São Paulo")
-        origin_matches = search_locations(origin_text)
-        origin_choice = st.selectbox("Selecione origem", [f"{x['iataCode']} — {x['name']}" for x in origin_matches] or [""])
-    with col2:
-        dest_text = st.text_input("Destino (cidade ou aeroporto)", value="Maceió")
-        dest_matches = search_locations(dest_text)
-        dest_choice = st.selectbox("Selecione destino", [f"{x['iataCode']} — {x['name']}" for x in dest_matches] or [""])
+token = get_access_token()
 
-    col3, col4, col5 = st.columns([1, 1, 1])
-    with col3:
-        date = st.date_input("Data de partida", value=(dt.date.today() + dt.timedelta(days=21)))
-    with col4:
-        adults = st.number_input("Adultos", 1, 9, 1)
-    with col5:
-        currency = st.selectbox("Moeda", ["BRL", "USD", "EUR"], index=0)
+# Origem
+origem_input = st.text_input("Origem (cidade ou aeroporto)", "São Paulo")
+aeroportos_origem = search_airports(origem_input, token)
 
-    non_stop = st.checkbox("Somente voos diretos", value=False)
-    submitted = st.form_submit_button("🔎 Buscar")
+origem_opcoes = []
+if aeroportos_origem:
+    origem_opcoes.append("Todos os aeroportos")
+    origem_opcoes.extend([f"{a['iataCode']} – {a['name']}" for a in aeroportos_origem])
 
-def extract_iata(selection: str) -> str:
-    return selection.split("—")[0].strip() if selection and "—" in selection else ""
+origem_escolha = st.selectbox("Selecione origem", origem_opcoes)
+if origem_escolha == "Todos os aeroportos":
+    origem_codes = [a['iataCode'] for a in aeroportos_origem]
+else:
+    origem_codes = [origem_escolha.split(" – ")[0]]
 
-if submitted:
-    origin_iata = extract_iata(origin_choice)
-    dest_iata = extract_iata(dest_choice)
-    date_str = date.strftime("%Y-%m-%d")
+# Destino
+destino_input = st.text_input("Destino (cidade ou aeroporto)", "Fortaleza")
+aeroportos_destino = search_airports(destino_input, token)
 
-    if not origin_iata or not dest_iata:
-        st.warning("Selecione origem e destino válidos.")
-        st.stop()
+destino_opcoes = []
+if aeroportos_destino:
+    destino_opcoes.append("Todos os aeroportos")
+    destino_opcoes.extend([f"{a['iataCode']} – {a['name']}" for a in aeroportos_destino])
 
-    with st.spinner("Buscando voos..."):
-        resp = search_offers(origin_iata, dest_iata, date_str, adults, currency, non_stop)
+destino_escolha = st.selectbox("Selecione destino", destino_opcoes)
+if destino_escolha == "Todos os aeroportos":
+    destino_codes = [a['iataCode'] for a in aeroportos_destino]
+else:
+    destino_codes = [destino_escolha.split(" – ")[0]]
 
-    if "error" in resp:
-        st.error("Erro: " + resp["error"])
-        st.stop()
+# Datas
+col1, col2 = st.columns(2)
+with col1:
+    data_partida = st.date_input("Data de partida", datetime.date.today() + datetime.timedelta(days=7))
+with col2:
+    ida_volta = st.checkbox("Incluir volta?")
+    data_volta = None
+    if ida_volta:
+        data_volta = st.date_input("Data de volta", datetime.date.today() + datetime.timedelta(days=14))
 
-    offers = resp.get("data", [])
-    if not offers:
-        st.info("Nenhum voo encontrado.")
-        st.stop()
+# Passageiros
+adultos = st.number_input("Quantidade de adultos", min_value=1, value=1)
 
-    offers.sort(key=lambda o: float(o["price"]["grandTotal"]))
-    for of in offers:
-        total = of["price"]["grandTotal"]
-        currency_code = of["price"]["currency"]
-        it = of["itineraries"][0]
-        duration = fmt_duration(it.get("duration", ""))
-        segs = it.get("segments", [])
-        legs = [f"{s['departure']['iataCode']} → {s['arrival']['iataCode']} ({fmt_duration(s.get('duration',''))})" for s in segs]
-        stops = len(segs) - 1
+# Buscar
+if st.button("🔍 Buscar Passagens"):
+    if origem_codes and destino_codes:
+        resultados = []
+        for destino_code in destino_codes:
+            resultados.extend(search_flights(origem_codes, destino_code, str(data_partida), adultos, token, str(data_volta) if data_volta else None))
 
-        st.markdown('<div class="card">', unsafe_allow_html=True)
-        st.markdown(f'<div class="price">{currency_code} {float(total):,.2f}</div>'.replace(",", "X").replace(".", ",").replace("X", "."), unsafe_allow_html=True)
-        st.markdown(f"<div class='muted'>{'Direto' if stops==0 else f'{stops} escala(s)'} • {duration}</div>", unsafe_allow_html=True)
-        st.markdown(" · ".join(legs))
-        url = google_flights_link(origin_iata, dest_iata, date_str, adults)
-        st.markdown(f"[Abrir no Google Flights]({url}){{: .buy }}", unsafe_allow_html=True)
-        st.markdown("</div>", unsafe_allow_html=True)
-        st.markdown("")
+        if resultados:
+            st.subheader(f"Resultados encontrados ({len(resultados)} opções):")
+
+            for voo in resultados[:10]:  # mostra até 10 voos
+                preco = voo["price"]["total"]
+                moeda = voo["price"]["currency"]
+
+                itinerario = voo["itineraries"][0]
+                partida = itinerario["segments"][0]["departure"]
+                chegada = itinerario["segments"][-1]["arrival"]
+
+                horario_partida = partida["at"].replace("T", " ")
+                horario_chegada = chegada["at"].replace("T", " ")
+                duracao = format_duration(itinerario["duration"])
+
+                companhia = voo["validatingAirlineCodes"][0] if "validatingAirlineCodes" in voo else "N/A"
+
+                # Card
+                with st.container():
+                    st.markdown(
+                        f"""
+                        <div style="padding:15px; margin-bottom:10px; border-radius:10px; 
+                            box-shadow:0px 2px 6px rgba(0,0,0,0.1); background:white;">
+                            <h4>{partida['iataCode']} → {chegada['iataCode']}</h4>
+                            <p>🛫 <b>Partida:</b> {horario_partida}</p>
+                            <p>🛬 <b>Chegada:</b> {horario_chegada}</p>
+                            <p>⏱️ <b>Duração:</b> {duracao}</p>
+                            <p>✈️ <b>Companhia:</b> {companhia}</p>
+                            <h3 style="color:#007bff;">💰 {preco} {moeda}</h3>
+                        </div>
+                        """,
+                        unsafe_allow_html=True
+                    )
+        else:
+            st.warning("Nenhum voo encontrado para os critérios selecionados.")
+    else:
+        st.error("Por favor, selecione origem e destino.")
