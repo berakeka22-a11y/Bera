@@ -1,2 +1,4 @@
 streamlit
+amadeus
 requests
+pandas
